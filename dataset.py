@@ -5,6 +5,7 @@ import os
 import scipy.io
 import pandas as pd
 from scipy.stats import zscore
+import math
 sampling_rate = 3.8147
 def get_onset_index(timing, sampling_rate):
     
@@ -80,14 +81,14 @@ def get_fnirs_dataloader(subject_ids, condition='nback', type='HbR', batch_size=
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
 class ONRData(Dataset):
-    def __init__(self, label_dtype = 'float', transform=None):
+    def __init__(self, label_dtype = 'float', downsampled = False, transform=None):
         self.participants = [
             'P07', 'P10', 'P11', 'P13', 'P14', 'P16', 'P17', 'P18', 'P22', 'P23', 
             'P24', 'P25', 'P26', 'P27', 'P28', 'P29', 'P30', 'P31', 'P32', 'P33', 
             'P34', 'P35', 'P36'
             ]
         self.label_dtype = label_dtype
-    
+        self.downsampled = downsampled
         timings = []
         for subject in self.participants:
             path = os.path.join("data", "lsl", subject+"_lsl.tri")
@@ -97,8 +98,12 @@ class ONRData(Dataset):
         self.timings = timings
         
         data = {}
+        if self.downsampled:
+            folder=  'data_csvs_downsampled'
+        else:
+            folder = 'data_csvs'
         for subject in self.participants:
-            path = os.path.join("data", "data_csvs", subject+".csv")
+            path = os.path.join("data", folder, subject+".csv")
             fnir = pd.read_csv(path, sep=",", header=0)
             fnir = fnir.drop(columns=['Time'])
             
@@ -106,8 +111,7 @@ class ONRData(Dataset):
 
             data[subject] = fnir
          
-        print(len(data))
-        print(len(timings))
+        
         
         
         
@@ -120,9 +124,12 @@ class ONRData(Dataset):
         for i in range(len(self.participants)):
             matched_times = timings[i][timings[i]['time'].isin(workload_dict[self.participants[i]]['timestamp'])]
             workload_dict[self.participants[i]] = workload_dict[self.participants[i]].merge(matched_times, left_on='timestamp', right_on='time', how='left')
-        print(len(workload_dict))
+        
         #parameters 
-        window_size = 4
+        if self.downsampled:
+            window_size = 4
+        else:
+            window_size = math.floor(4 * 3.8147)
         #collating data and labels
         
        
@@ -145,7 +152,11 @@ class ONRData(Dataset):
                 #Get the corresponding fnirs sample 
                 if(np.isnan(onset)):
                     continue
-                index = get_onset_index(onset, sampling_rate)
+                if(self.downsampled):
+                    index = get_onset_index(onset, sampling_rate)
+                else:
+                    index = int(onset)
+               
                 
                 #Calculate the window
                 fnirs_sample = sub_data[index-window_size+1:index+1]
@@ -167,13 +178,36 @@ class ONRData(Dataset):
                 
                 X.append(fnirs_sample_structure)
                 
+                
                 y.append(label)
                 groups.append(sub)
             
             
         X = np.array(X)
-        y = [0 if i == 'optimal' else 1 for i in y]
+        print(np.unique(y))
+        #convert labels to integers
+        mapping = {'optimal': 0, 'underload': 2, 'overload': 1}
+        y = [mapping[label] for label in y]
+        #check counts of each label
+        counts = np.bincount(y)
+        print("Counts of each label:")
+        for i, count in enumerate(counts):
+            print(f"Label {i}: {count}")
+
+        #remove the labels that are underload
+        X = [X[i] for i in range(len(X)) if y[i] != 2]
+        groups = [groups[i] for i in range(len(groups)) if y[i] != 2]
+        y = [y for y in y if y != 2]
+
         y = np.array(y)
+        
+        #try for P10
+        X = [X[i] for i in range(len(X)) if groups[i] == 'P10']
+        y = [y[i] for i in range(len(y)) if groups[i] == 'P10']
+        groups = [groups[i] for i in range(len(groups)) if groups[i] == 'P10']
+        print(np.array(X).shape)
+        print(np.array(y).shape)
+      
         
         self.X = X
         
@@ -192,8 +226,8 @@ class ONRData(Dataset):
             sample = self.transform(sample)
         sample = torch.tensor(sample, dtype=torch.float32)
         
-        pad_height = (4 - sample.shape[0] % 4) % 4 
-        pad_width = (4 - sample.shape[1] % 4) % 4 
+        # pad_height = (4 - sample.shape[0] % 4) % 4 
+        # pad_width = (4 - sample.shape[1] % 4) % 4 
         sample = torch.permute(sample, (2, 0, 1))
 
 
@@ -205,7 +239,7 @@ class ONRData(Dataset):
         # Normalize
         sample = (sample - mean) / (std + 1e-8)  # Adding epsilon for numerical stability
 
-        sample = torch.nn.functional.pad(sample, (0, pad_width, 0, pad_height), mode='constant', value=0)
+        # sample = torch.nn.functional.pad(sample, (0, pad_width, 0, pad_height), mode='constant', value=0)
         
        
         
@@ -222,8 +256,7 @@ if __name__ == '__main__':
     dataset = ONRData()
     print(len(dataset))
     print(dataset[0][0].shape)
-    print(dataset[0][1])
-    print(dataset[0][0])
+   
     print(dataset[0][0].shape)
     print(dataset[0][0].dtype)
     print(dataset[0][1].dtype)
