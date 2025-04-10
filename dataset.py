@@ -81,7 +81,7 @@ def get_fnirs_dataloader(subject_ids, condition='nback', type='HbR', batch_size=
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
 class ONRData(Dataset):
-    def __init__(self, label_dtype = 'float', downsampled = False, transform=None):
+    def __init__(self, label_dtype = 'float', downsampled = False, transform=None, feature_extraction=False):
         self.participants = [
             'P07', 'P10', 'P11', 'P13', 'P14', 'P16', 'P17', 'P18', 'P22', 'P23', 
             'P24', 'P25', 'P26', 'P27', 'P28', 'P29', 'P30', 'P31', 'P32', 'P33', 
@@ -94,6 +94,15 @@ class ONRData(Dataset):
             path = os.path.join("data", "lsl", subject+"_lsl.tri")
             timing = pd.read_csv(path, sep=";", header=None, names=['time', 'onset', 'code'])
             timing['time'] = pd.to_datetime(timing['time']).dt.strftime('%H:%M:%S')
+            for i in [2,3,4,6]: #remove the seventh trial
+                #find the sixth and seventh instance of the code
+                seventh = timing[timing['code'] == int("1"+str(i))].index[-1]
+                sixth = timing[timing['code'] == int("1"+str(i))].index[-2]
+                #remove all events in the middle
+                timing = timing.drop(timing.index[sixth+1:seventh+1])
+                
+
+
             timings.append(timing)
         self.timings = timings
         
@@ -136,7 +145,7 @@ class ONRData(Dataset):
         X = []
         y = []
         groups = []
-        channel_structure = pd.read_csv("data/channel_structure.csv").to_numpy()
+        channel_structure = pd.read_csv("data/channel_structure.csv", header=None).to_numpy()
        
         #iterate through the subjects
         for sub in self.participants:
@@ -159,24 +168,64 @@ class ONRData(Dataset):
                
                 
                 #Calculate the window
-                fnirs_sample = sub_data[index-window_size+1:index+1]
-                #normalize the sample
-                fnirs_sample = zscore(fnirs_sample, axis=1)
+                fnirs_sample = sub_data[index - window_size + 1 : index + 1, :]  # Extract window (time, channels)
                 
+                
+                
+                
+                print("sample shape:" + str(fnirs_sample.shape))
                 fnirs_sample_structure = np.zeros((9,8,window_size))
                 
                 for i in range(9):
                     for j in range(8):
                         for k in range(window_size):
-                            channel = int(channel_structure[i,j]/2 -1)
-                           
+                            
+                            channel = int(channel_structure[i,j] -1)
+                            
+                            
                             fnirs_sample_structure[i,j,k] = fnirs_sample[k][channel]
+                fnirs_sample  = fnirs_sample_structure
+                if feature_extraction:
+                    # The shape is now (9, 8, window_size) - need to calculate features differently
+                    # Calculate features across the time dimension (axis=2)
+                    mean = np.mean(fnirs_sample, axis=2)  # (9, 8)
+                    variance = np.var(fnirs_sample, axis=2) + 1e-8  # (9, 8)
+                    skewness = np.zeros_like(mean)
+                    kurtosis = np.zeros_like(mean)
+                    max_val = np.max(fnirs_sample, axis=2)  # (9, 8)
+                    min_val = np.min(fnirs_sample, axis=2)  # (9, 8)
+                    range_val = max_val - min_val  # (9, 8)
+                    
+                    # Calculate higher order statistics 
+                    for i in range(9):
+                        for j in range(8):
+                            # Calculate skewness
+                            diff = fnirs_sample[i, j, :] - mean[i, j]
+                            skewness[i, j] = np.mean(diff**3) / (variance[i, j] ** 1.5)
+                            # Calculate kurtosis
+                            kurtosis[i, j] = np.mean(diff**4) / (variance[i, j] ** 2)
+                    
+                    # Flatten all features to create a feature vector
+                    mean_flat = mean.flatten()
+                    variance_flat = variance.flatten()
+                    skewness_flat = skewness.flatten()
+                    kurtosis_flat = kurtosis.flatten()
+                    max_flat = max_val.flatten()
+                    range_flat = range_val.flatten()
+                    
+                    # Concatenate all features
+                    fnirs_sample = np.concatenate([
+                        mean_flat, variance_flat, skewness_flat, 
+                        kurtosis_flat, max_flat, range_flat
+                    ])
+                    
+                    print("sample shape after feature extraction:" + str(fnirs_sample.shape))
                 
                 if np.isnan(fnirs_sample).any():
                     continue
-                
-                
-                X.append(fnirs_sample_structure)
+                    
+                    
+                X.append(fnirs_sample)
                 
                 
                 y.append(label)
@@ -202,9 +251,9 @@ class ONRData(Dataset):
         y = np.array(y)
         
         #try for P10
-        X = [X[i] for i in range(len(X)) if groups[i] == 'P10']
-        y = [y[i] for i in range(len(y)) if groups[i] == 'P10']
-        groups = [groups[i] for i in range(len(groups)) if groups[i] == 'P10']
+        # X = [X[i] for i in range(len(X)) if groups[i] == 'P10']
+        # y = [y[i] for i in range(len(y)) if groups[i] == 'P10']
+        # groups = [groups[i] for i in range(len(groups)) if groups[i] == 'P10']
         print(np.array(X).shape)
         print(np.array(y).shape)
       
@@ -231,13 +280,9 @@ class ONRData(Dataset):
         sample = torch.permute(sample, (2, 0, 1))
 
 
-        #normalize across the channel dimension
-        # Compute mean and std along the 0th dimension (D)
-        mean = sample.mean(dim=0, keepdim=True)
-        std = sample.std(dim=0, keepdim=True)
+       
 
-        # Normalize
-        sample = (sample - mean) / (std + 1e-8)  # Adding epsilon for numerical stability
+        
 
         # sample = torch.nn.functional.pad(sample, (0, pad_width, 0, pad_height), mode='constant', value=0)
         
@@ -254,13 +299,13 @@ class ONRData(Dataset):
 if __name__ == '__main__':
     # Test the dataset
     dataset = ONRData()
-    print(len(dataset))
-    print(dataset[0][0].shape)
+    # print(len(dataset))
+    # print(dataset[0][0].shape)
    
-    print(dataset[0][0].shape)
-    print(dataset[0][0].dtype)
-    print(dataset[0][1].dtype)
-    print(dataset[0][0].max())
-    print(dataset[0][0].min())
-    print(dataset[0][0].mean())
-    print(dataset[0][0].std())
+    # print(dataset[0][0].shape)
+    # print(dataset[0][0].dtype)
+    # print(dataset[0][1].dtype)
+    # print(dataset[0][0].max())
+    # print(dataset[0][0].min())
+    # print(dataset[0][0].mean())
+    # print(dataset[0][0].std())
